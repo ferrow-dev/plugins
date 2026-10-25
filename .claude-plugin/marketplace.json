@@ -1,0 +1,15 @@
+{
+  "name": "ferrow",
+  "description": "Ferrow's plugins for Claude Code.",
+  "owner": {
+    "name": "ferrow-dev",
+    "url": "https://ferrow.dev"
+  },
+  "plugins": [
+    {
+      "name": "ferrow",
+      "source": "./plugins/ferrow",
+      "description": "Connect Claude Code to Ferrow as an agent: /ferrow:connect, the Ferrow MCP server, the agent protocol skill and session hooks."
+    }
+  ]
+}

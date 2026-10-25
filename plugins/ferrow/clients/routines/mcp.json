@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ferrow": {
+      "type": "http",
+      "url": "${FERROW_URL:-https://app.ferrow.dev}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${FERROW_AGENT_TOKEN}",
+        "X-Ferrow-Client": "claude_code"
+      }
+    }
+  }
+}

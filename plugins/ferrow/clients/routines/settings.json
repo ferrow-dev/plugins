@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "[ \"$CLAUDE_CODE_REMOTE\" = true ] && \"$CLAUDE_PROJECT_DIR\"/.claude/ferrow/ferrow-hook.sh SessionStart 5 || printf '{}\\n'", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "[ \"$CLAUDE_CODE_REMOTE\" = true ] && \"$CLAUDE_PROJECT_DIR\"/.claude/ferrow/ferrow-hook.sh PreCompact 5 || printf '{}\\n'", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "[ \"$CLAUDE_CODE_REMOTE\" = true ] && \"$CLAUDE_PROJECT_DIR\"/.claude/ferrow/ferrow-hook.sh PostToolUse 5 || printf '{}\\n'", "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "[ \"$CLAUDE_CODE_REMOTE\" = true ] && \"$CLAUDE_PROJECT_DIR\"/.claude/ferrow/ferrow-hook.sh Stop 5 || printf '{}\\n'", "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "[ \"$CLAUDE_CODE_REMOTE\" = true ] && \"$CLAUDE_PROJECT_DIR\"/.claude/ferrow/ferrow-hook.sh SessionEnd 1 || printf '{}\\n'", "timeout": 2 }
+        ]
+      }
+    ]
+  }
+}

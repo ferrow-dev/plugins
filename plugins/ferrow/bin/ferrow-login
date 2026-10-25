@@ -1,0 +1,126 @@
+#!/bin/sh
+# Connects this machine to Ferrow as an agent (wiki `14 · Agent layer` §17.5):
+# asks the server for a code, prints it with the page to approve it on, polls
+# until someone does, and files the agent's token in the credentials file.
+# The token is never printed. POSIX sh and curl, so Claude Code, Codex,
+# Hermes and a bare shell all run this one script.
+#
+#   ferrow-login [--server URL] [--client ID] [--open] [--porcelain]
+#   ferrow-login --logout [--server URL]
+#
+# --porcelain prints `url …`, `code …`, then `connected <workspace> <agent>`
+# or `error <code>`, one per line, for the mod to read.
+. "$(dirname "$0")/../lib/credentials.sh"
+
+server=""
+client="ferrow-claude-code"
+open=""
+porcelain=""
+logout=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --server) server="$2"; shift 2 ;;
+    --client) client="$2"; shift 2 ;;
+    --open) open=1; shift ;;
+    --porcelain) porcelain=1; shift ;;
+    --logout) logout=1; shift ;;
+    *) printf 'ferrow-login: unknown option %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+server="$(ferrow_server "$server")"
+
+say() { [ -n "$porcelain" ] || printf '%s\n' "$*"; }
+tell() { [ -z "$porcelain" ] || printf '%s\n' "$*"; }
+fail() {
+  tell "error ${1:-no_code}"
+  printf 'ferrow-login: %s\n' "$2" >&2
+  exit 1
+}
+number() { printf '%s\n' "$1" | sed -nE "s/.*\"$2\"[[:space:]]*:[[:space:]]*([0-9]+).*/\\1/p" | head -n 1; }
+
+command -v curl >/dev/null 2>&1 || fail no_curl "curl is needed"
+
+if [ -n "$logout" ]; then
+  token="$(ferrow_file_token "$server")"
+  if [ -z "$token" ]; then
+    tell "disconnected"
+    say "Not connected to $server."
+    exit 0
+  fi
+  # Revoked first, so a token that could not be revoked is still on file
+  # to try again; a token the server no longer knows is gone either way.
+  status="$(printf 'header = "Authorization: Bearer %s"\n' "$token" |
+    curl --silent --max-time 10 --config - --request DELETE \
+      --output /dev/null --write-out '%{http_code}' "$server/agent/token")"
+  case "$status" in
+    204|401|404) ;;
+    *) fail revoke_failed "could not revoke the token at $server (HTTP ${status:-none}); still connected" ;;
+  esac
+  ferrow_write_entry "$server" "" || fail write_failed "could not update $(ferrow_credentials)"
+  tell "disconnected"
+  say "Disconnected from $server; the token is revoked."
+  exit 0
+fi
+
+device="$( (hostname 2>/dev/null || uname -n) | tr -c 'A-Za-z0-9._-' '-' | sed 's/-*$//' | cut -c 1-64)"
+[ -n "$device" ] || device="unknown"
+
+started="$(printf 'client_id=%s&device_name=%s' "$client" "$device" |
+  curl --silent --max-time 15 --data @- "$server/api/oauth/device_authorization")" ||
+  fail unreachable "cannot reach $server"
+device_code="$(ferrow_field "$started" device_code)"
+user_code="$(ferrow_field "$started" user_code)"
+uri="$(ferrow_field "$started" verification_uri)"
+complete="$(ferrow_field "$started" verification_uri_complete)"
+interval="$(number "$started" interval)"
+expires="$(number "$started" expires_in)"
+[ -n "$device_code" ] && [ -n "$user_code" ] ||
+  fail "$(ferrow_field "$started" error)" "$server did not give a code: $started"
+
+tell "url $complete"
+tell "code $user_code"
+say "To connect this machine to Ferrow, open"
+say ""
+say "    $uri"
+say ""
+say "and enter the code $user_code (or open $complete)."
+if [ -n "$open" ]; then
+  if [ "$(uname)" = Darwin ]; then
+    open "$complete" >/dev/null 2>&1 &
+  elif [ -n "$DISPLAY$WAYLAND_DISPLAY" ] && command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$complete" >/dev/null 2>&1 &
+  fi
+fi
+say "Waiting for approval…"
+
+waited=0
+interval="${interval:-5}"
+expires="${expires:-600}"
+while [ "$waited" -lt "$expires" ]; do
+  sleep "$interval"
+  waited=$((waited + interval))
+  answer="$(printf 'grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=%s&device_code=%s' "$client" "$device_code" |
+    curl --silent --max-time 15 --data @- "$server/api/oauth/token")" || continue
+  token="$(ferrow_field "$answer" access_token)"
+  if [ -n "$token" ]; then
+    workspace="$(ferrow_field "$answer" workspace)"
+    agent_id="$(ferrow_field "$answer" agent_id)"
+    agent_name="$(ferrow_field "$answer" agent_name)"
+    saved="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    entry="$(printf '{"token": "%s", "workspace": "%s", "agent_id": "%s", "agent_name": "%s", "device_name": "%s", "saved_at": "%s"}' \
+      "$token" "$workspace" "$agent_id" "$agent_name" "$device" "$saved")"
+    ferrow_write_entry "$server" "$entry" || fail write_failed "could not write $(ferrow_credentials)"
+    tell "connected $workspace $agent_name"
+    say "Connected as $agent_name in $workspace."
+    exit 0
+  fi
+  case "$(ferrow_field "$answer" error)" in
+    authorization_pending) ;;
+    slow_down) interval=$((interval + 5)) ;;
+    access_denied) fail access_denied "the code was turned down" ;;
+    expired_token) fail expired_token "the code expired; run this again" ;;
+    invalid_grant) fail invalid_grant "the server does not know this code" ;;
+    *) ;;
+  esac
+done
+fail expired_token "the code expired; run this again"

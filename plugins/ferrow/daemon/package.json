@@ -1,0 +1,14 @@
+{
+  "name": "@ferrow/daemon",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ferrow-daemon": "./ferrow-daemon.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.296"
+  }
+}

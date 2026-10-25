@@ -1,0 +1,26 @@
+{
+  "name": "ferrow",
+  "displayName": "Ferrow",
+  "description": "Ferrow for Claude Code: /ferrow:connect, the Ferrow MCP server, the agent protocol skill, session hooks and a mod that wakes the session on new inbox work.",
+  "author": { "name": "Ferrow" },
+  "homepage": "https://ferrow.dev",
+  "license": "MIT",
+  "keywords": ["ferrow", "work-management", "agents", "mcp"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "wake": {
+      "type": "string",
+      "title": "Wake on new inbox work",
+      "description": "on: start a turn by itself; ask: ask first; off: never (the agent calls inbox_wait itself). /ferrow:wake overrides it on this machine.",
+      "options": ["on", "ask", "off"],
+      "default": "ask"
+    },
+    "watchman": {
+      "type": "string",
+      "title": "Watchman after each Ferrow turn",
+      "description": "on: after a turn that touched Ferrow, one fork of the conversation (billed to you) reviews the pack's unverified blocks and writes its flags and confirms to Ferrow (what Ferrow refuses waits behind f in the band); off: never. /ferrow:watchman overrides it on this machine.",
+      "options": ["on", "off"],
+      "default": "off"
+    }
+  }
+}

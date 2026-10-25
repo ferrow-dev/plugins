@@ -1,0 +1,15 @@
+#!/bin/sh
+# The ferrow MCP server's headersHelper (.mcp.json): prints the Authorization
+# header for the server Claude Code is connecting to, from the credentials
+# file, or {} when it holds none, which leaves the static header
+# (FERROW_AGENT_TOKEN) in place. Claude Code runs it on every connect and
+# once more after a 401, so a fresh /ferrow:connect is picked up on reconnect.
+# Its environment has no FERROW_AGENT_TOKEN (names with TOKEN are stripped),
+# which is why the file exists at all.
+. "$(dirname "$0")/../lib/credentials.sh"
+token="$(ferrow_file_token "$(ferrow_server "${CLAUDE_CODE_MCP_SERVER_URL:-}")")"
+if [ -n "$token" ]; then
+  printf '{"Authorization": "Bearer %s"}\n' "$token"
+else
+  printf '{}\n'
+fi

@@ -1,0 +1,42 @@
+{
+  "description": "Ferrow session hooks (briefing, notes, edit reminders, stop gate, close) and the Ferrow mod.",
+  "modules": ["./register.js"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ferrow-hook.sh", "args": ["SessionStart", "5"], "timeout": 10 }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ferrow-hook.sh", "args": ["PreCompact", "5"], "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ferrow-hook.sh", "args": ["PostToolUse", "5"], "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ferrow-hook.sh", "args": ["Stop", "5"], "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/ferrow-hook.sh", "args": ["SessionEnd", "1"], "timeout": 2 }
+        ]
+      }
+    ]
+  }
+}
