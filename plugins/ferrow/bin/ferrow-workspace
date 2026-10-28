@@ -1,0 +1,36 @@
+#!/bin/sh
+# The workspace a directory works in and the token for it, for the mod
+# (hooks/register.js), which cannot source lib/credentials.sh itself. One
+# `<word> <value>` per line:
+#
+#   workspace <slug>   (`-` when none)
+#   reason    env | ferrow.toml | binding | only | none | several
+#   agent     <agent name>   (`-` when no token is on file)
+#   envok     1 | 0          whether FERROW_AGENT_TOKEN may stand in
+#   known     <slug> …       the workspaces with a token on file
+#   token     <token>        with --token, when one is on file
+#
+#   ferrow-workspace [--cwd DIR] [--server URL] [--token]
+. "$(dirname "$0")/../lib/credentials.sh"
+dir="$(pwd)"
+show_token=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd) dir="$2"; shift 2 ;;
+    --server) FERROW_URL="$2"; shift 2 ;;
+    --token) show_token=1; shift ;;
+    *) printf 'ferrow-workspace: unknown option %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+ferrow_resolve "$dir"
+printf 'workspace %s\n' "${ferrow_ws:--}"
+printf 'reason %s\n' "$ferrow_why"
+if [ -n "$ferrow_token" ]; then
+  printf 'agent %s\n' "${ferrow_agent:-agent}"
+else
+  printf 'agent -\n'
+fi
+printf 'envok %s\n' "${ferrow_envok:-0}"
+printf 'known %s\n' "$(ferrow_workspaces | tr '\n' ' ' | sed 's/ $//')"
+[ -n "$show_token" ] && [ -n "$ferrow_token" ] && printf 'token %s\n' "$ferrow_token"
+exit 0

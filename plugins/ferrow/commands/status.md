@@ -1,5 +1,5 @@
 ---
-description: Show the Ferrow session, lease and inbox count
+description: Show the Ferrow session, lease, inbox count, and which workspace this repo works in and why
 ---
 
 The Ferrow mod answers this command itself. If you are reading this, the mod is

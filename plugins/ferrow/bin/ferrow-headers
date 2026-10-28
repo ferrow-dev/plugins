@@ -1,15 +1,23 @@
 #!/bin/sh
 # The ferrow MCP server's headersHelper (.mcp.json): prints the Authorization
-# header for the server Claude Code is connecting to, from the credentials
-# file, or {} when it holds none, which leaves the static header
-# (FERROW_AGENT_TOKEN) in place. Claude Code runs it on every connect and
-# once more after a 401, so a fresh /ferrow:connect is picked up on reconnect.
-# Its environment has no FERROW_AGENT_TOKEN (names with TOKEN are stripped),
-# which is why the file exists at all.
+# header for the workspace this session's repo works in (lib/credentials.sh,
+# ferrow_resolve). Claude Code runs it in the session's directory on every
+# connect and once more after a 401, so a fresh /ferrow:connect is picked up
+# on reconnect, and a session keeps the workspace it started in.
+#
+# With a token on file it prints that token. Where FERROW_AGENT_TOKEN may
+# stand in it prints {}, which leaves the static header (that variable) in
+# place: the helper's own environment may not carry names with TOKEN in
+# them. Anywhere else — a declared workspace with no token on file, or
+# several tokens and none declared — it blanks the header, so another
+# workspace's agent never answers for this repo.
 . "$(dirname "$0")/../lib/credentials.sh"
-token="$(ferrow_file_token "$(ferrow_server "${CLAUDE_CODE_MCP_SERVER_URL:-}")")"
-if [ -n "$token" ]; then
-  printf '{"Authorization": "Bearer %s"}\n' "$token"
-else
+FERROW_URL="$(ferrow_server "${CLAUDE_CODE_MCP_SERVER_URL:-}")"
+ferrow_resolve "$(pwd)"
+if [ -n "$ferrow_token" ]; then
+  printf '{"Authorization": "Bearer %s"}\n' "$ferrow_token"
+elif [ -n "$ferrow_envok" ]; then
   printf '{}\n'
+else
+  printf '{"Authorization": ""}\n'
 fi

@@ -27,6 +27,10 @@ const WORDS = {
       title: 'başlık',
       paste: 'ferrow.toml\'a yapıştırmaya hazır:',
       unknown: 'bilinmeyen sayfa',
+      create: n => `bu başlıkla oluştur: /ferrow:map create ${n}`,
+      created: title => `"${title}" sayfası oluşturuldu.`,
+      exists: title => `"${title}" sayfası zaten var; oluşturulmadı.`,
+      noEntry: n => `ferrow.toml'da ${n}. kayıt yok.`,
       ambiguous: 'aynı başlıkta birden çok sayfa',
       blockUnknown: 'bilinmeyen blok',
       duplicate: n => `${n}. kaydın tekrarı`,
@@ -39,6 +43,8 @@ const WORDS = {
     watchman: 'Bekçi',
     none: 'yok',
     notConnected: 'bağlı değil',
+    notConnectedTo: workspace => `${workspace} için bağlı değil`,
+    several: known => `birden çok çalışma alanı (${known.join(', ')}), bu repo birini seçmiyor`,
     connecting: (code, url) => `kod ${code} · onayla: ${url}`,
   },
   en: {
@@ -55,6 +61,10 @@ const WORDS = {
       title: 'title',
       paste: 'Ready to paste into ferrow.toml:',
       unknown: 'unknown page',
+      create: n => `create with this title: /ferrow:map create ${n}`,
+      created: title => `Created page "${title}".`,
+      exists: title => `A page "${title}" is already there; nothing was created.`,
+      noEntry: n => `ferrow.toml has no entry ${n}.`,
       ambiguous: 'several pages have this title',
       blockUnknown: 'unknown block',
       duplicate: n => `repeats entry ${n}`,
@@ -70,6 +80,8 @@ const WORDS = {
     watchman: 'watchman',
     none: 'none',
     notConnected: 'not connected',
+    notConnectedTo: workspace => `not connected to ${workspace}`,
+    several: known => `several workspaces (${known.join(', ')}) and this repo names none`,
     connecting: (code, url) => `code ${code} · approve at ${url}`,
   },
 }
@@ -91,15 +103,35 @@ export function targetLabel(obligation) {
   return obligation.reason ?? obligation.id
 }
 
+/** Each list's rows, once; `item` is the key a row was listed under, kept
+    when the same row came first without one. */
 export function liveObligations(lists) {
-  const seen = new Set()
+  const seen = new Map()
   const out = []
   for (const one of lists.flat()) {
-    if (!one || seen.has(one.id) || !LIVE.includes(one.status)) continue
-    seen.add(one.id)
-    out.push({ id: one.id, status: one.status, reason: one.reason ?? '', label: targetLabel(one) })
+    if (!one || !LIVE.includes(one.status)) continue
+    const known = seen.get(one.id)
+    if (known) {
+      known.item ??= one.item ?? null
+      continue
+    }
+    const row = { id: one.id, status: one.status, kind: one.kind ?? null, item: one.item ?? null, reason: one.reason ?? '', label: targetLabel(one) }
+    seen.set(one.id, row)
+    out.push(row)
   }
   return out
+}
+
+/** What an item owes once its work is done (its pull request), not while it
+    runs: Claude Code stops at the end of every turn (FERR-47). */
+const END_OF_WORK = ['link_pr', 'summary_comment']
+
+/** The obligations a turn's Stop asks about: all but the end-of-work ones of
+    the item still leased, in time. A released item's still count (FERR-26). */
+export function stopObligations(open, lease, leaseUntil, now) {
+  const until = leaseUntil ? Date.parse(leaseUntil) : NaN
+  const held = lease && Number.isFinite(until) && until > now ? lease : null
+  return open.filter(one => !(held && one.item === held && END_OF_WORK.includes(one.kind)))
 }
 
 export function readOf(row) {
@@ -143,16 +175,26 @@ export function leaseMinutes(until, now) {
 
 const width = button => button.hotkey.length + 2 + button.label.length
 
+/** The reasons a repo names its workspace itself (lib/credentials.sh). */
+const DECLARED = ['env', 'ferrow.toml', 'binding']
+
 /**
  * The band's one line while the plugin has no token (§17.5): the code to
- * approve while `/ferrow:connect` waits, else how to connect. Null once
- * connected, when `bandModel` takes over.
+ * approve while `/ferrow:connect` waits, else how to connect — to the
+ * workspace the repo names, or which one, when several are on file and the
+ * repo names none. Null once connected, when `bandModel` takes over.
  */
 export function connectLine(state, lang, columns) {
   const w = words(lang)
   if (state.connecting) return fit(`ferrow · ${w.connecting(state.connecting.code, state.connecting.url)}`, columns)
-  if (!state.connected) return fit(`ferrow · ${w.notConnected} · /ferrow:connect`, columns)
-  return null
+  if (state.connected) return null
+  if (state.reason === 'several') {
+    return fit(`ferrow · ${w.notConnected} · ${w.several(state.known ?? [])} · /ferrow:connect <workspace>`, columns)
+  }
+  if (state.workspace && DECLARED.includes(state.reason)) {
+    return fit(`ferrow · ${w.notConnectedTo(state.workspace)} · /ferrow:connect`, columns)
+  }
+  return fit(`ferrow · ${w.notConnected} · /ferrow:connect`, columns)
 }
 
 export function bandModel(state, lang, columns) {
@@ -241,6 +283,17 @@ export function suggestLines(rows, lang) {
   return lines
 }
 
+/**
+ * The entries whose page does not exist, each with the command that creates
+ * it under the entry's exact title. `checked` is the check route's answer.
+ */
+export function unknownLines(entries, checked, lang) {
+  const w = words(lang)
+  return (checked?.entries ?? [])
+    .filter(row => row.status === 'page_unknown' && entries[row.entry - 1])
+    .map(row => `"${entries[row.entry - 1].page.trim()}" (${w.map.unknown}) · ${w.map.create(row.entry)}`)
+}
+
 function entryLabel(entry, checked, w) {
   const named = entry.block ? `${entry.page} › ${entry.block}` : entry.page
   if (!checked) return named
@@ -270,6 +323,7 @@ export function mapReport(report, lang) {
   report.entries.forEach((entry, n) => {
     const row = checked?.find(one => one.entry === n + 1)
     lines.push(`${n + 1}. ${entry.paths.join(', ')} → ${entryLabel(entry, row, w)}`)
+    if (row?.status === 'page_unknown') lines.push(`   ${w.map.create(n + 1)}`)
   })
   if (!report.checked) lines.push(`(${w.map.offline})`)
   const loose = report.unmapped ?? []

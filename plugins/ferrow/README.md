@@ -44,24 +44,55 @@ desktop app and SDK hosts read it too).
 
 ## Configure
 
-The token is read from the credentials file first, then from the
-environment:
+An agent belongs to one workspace, so a person who works in two workspaces
+from one machine has two agents, and the plugin keeps a token per
+workspace. Each session works in the workspace its repo works in, chosen in
+this order (`lib/credentials.sh`, `ferrow_resolve`):
+
+1. `FERROW_WORKSPACE`;
+2. `workspace = "<slug>"` at the top of the repo's `ferrow.toml` (the team's choice, committed);
+3. the repo's binding in `~/.config/ferrow/repos.json`, which `/ferrow:connect` writes (your own, for a repo with no `ferrow.toml` line yet);
+4. nothing declared and one token on file: that one;
+5. nothing declared and several on file: not connected; the band names them.
+
+A repo that names a workspace with no token on file is not connected to it.
+Another workspace's agent never stands in, and once `/ferrow:connect` has
+filed any token, neither does `FERROW_AGENT_TOKEN` (outside the daemon): it
+is often set for every shell, for another workspace. The MCP helper, the hooks and the
+mod all run the same resolver, so a session never splits across two agents.
+The workspace is fixed when the session starts: the MCP token is chosen when
+the server connects, so `cd`-ing into another repo mid-session keeps the
+first workspace.
 
 | Where | What |
 |---|---|
-| `${XDG_CONFIG_HOME:-~/.config}/ferrow/credentials.json` | Written by `/ferrow:connect` (`bin/ferrow-login`), mode 0600, one entry per server. The MCP server reads it through `bin/ferrow-headers` (its `headersHelper`), the hook shim and the mod read it directly. |
-| `FERROW_AGENT_TOKEN` | An agent's personal access token, minted under workspace settings → Members → Agents: for CI, the daemon and Routines, where nobody approves a code. |
-| `FERROW_URL` | The Ferrow server, without a trailing `/mcp`; default `https://app.ferrow.dev`. It also picks the credentials file's entry. |
+| `${XDG_CONFIG_HOME:-~/.config}/ferrow/credentials.json` | Written by `/ferrow:connect` (`bin/ferrow-login`), mode 0600, one entry per workspace. A version-1 file (one entry per server) is migrated on first read. |
+| `${XDG_CONFIG_HOME:-~/.config}/ferrow/repos.json` | Repo root → workspace, written by `/ferrow:connect`. |
+| `FERROW_WORKSPACE` | Overrides the repo's workspace for a session. |
+| `FERROW_AGENT_TOKEN` | An agent's personal access token, minted under workspace settings → Members → Agents: for CI, the daemon and Routines, where nobody approves a code. Used on a machine with no token on file (Codex, Hermes, CI set up by hand), and under the daemon. |
+| `FERROW_URL` | Development only: a local or staging server instead of `https://app.ferrow.dev`. Its tokens and bindings live in `credentials.<host>.json` and `repos.<host>.json`, apart from production's. |
 
-Without either, nothing reaches Ferrow, and the band says
-`ferrow · not connected · /ferrow:connect`. Without mods (managed
-`allowManagedModsOnly`, SDK hosts), run `! sh ${CLAUDE_PLUGIN_ROOT}/bin/ferrow-login`
+Without a token, nothing reaches Ferrow, and the band says how to connect:
+`ferrow · not connected · /ferrow:connect`, or `not connected to korzio`
+for a repo that names a workspace. Without mods (managed
+`allowManagedModsOnly`, SDK hosts), run `! sh ${CLAUDE_PLUGIN_ROOT}/bin/ferrow-login [workspace]`
 yourself, then reconnect the server from `/mcp`; `--logout` signs out.
 
-The MCP server is `${FERROW_URL}/mcp` with the token as a bearer; its tools
-show up as `mcp__plugin_ferrow_ferrow__<tool>`. The server also answers OAuth
-discovery (`/.well-known/oauth-protected-resource`), but OAuth signs in a
-person, not the agent: use the agent token so the work is signed by the agent.
+The MCP server is `${FERROW_URL}/mcp/agent` with the agent's token as a
+bearer; its tools show up as `mcp__plugin_ferrow_ferrow__<tool>`. That
+endpoint takes an agent's token and nothing else, and offers no OAuth: with
+no token it answers 403, so Claude Code never starts a sign-in on it.
+
+To use Ferrow as yourself as well (your own work, signed by you), add a
+second server at the people's endpoint; it signs in over OAuth:
+
+```sh
+claude mcp add --transport http ferrow-me https://app.ferrow.dev/mcp/user
+```
+
+The two have different URLs, so Claude Code keeps both (it drops a plugin's
+server whose URL matches one you configured). `/mcp` still takes either kind,
+for older installs.
 
 Wake mode: the plugin option `wake` (`/config`, default `ask`) or
 `/ferrow:wake on|ask|off`, which is kept on this machine and wins over the
@@ -160,9 +191,9 @@ so the band has no line or keys for them.
 
 | Command | Does |
 |---|---|
-| `/ferrow:connect` | a code to approve in the browser; the band shows it until approved, then the plugin connects |
-| `/ferrow:logout` | revokes the filed token (`DELETE /agent/token`) and drops it from the credentials file |
-| `/ferrow:status` | session, lease, inbox, open obligations, wake, usage, watchman (findings waiting, its cost, the last failure), server and where the token came from |
+| `/ferrow:connect [workspace]` | connects the repo's workspace (or the one named): a code to approve in the browser, which pre-selects that workspace; the band shows the code until approved, then the plugin connects. With a token for that workspace already on file it only binds the repo. It binds the repo after an approval, says when the approval was for another workspace than the repo names, and offers the `ferrow.toml` line |
+| `/ferrow:logout` | revokes the repo's workspace token (`DELETE /agent/token`) and drops it from the credentials file |
+| `/ferrow:status` | session, lease, inbox, open obligations, wake, usage, watchman (findings waiting, its cost, the last failure), the workspace and why it was chosen, server and where the token came from |
 | `/ferrow:inbox` | lists the inbox (key · reason · trust · id; never a row's text) |
 | `/ferrow:inbox ack N` | acknowledges row N |
 | `/ferrow:obligations` | lists the open obligations of the session and the leased item |
@@ -253,10 +284,14 @@ gate).
 
 ## ferrow.toml
 
-Says which wiki page documents which code. At the repo root, one `[[map]]`
+Says which workspace the repo works in, and which wiki page documents which
+code. At the repo root: `workspace` at the top, before any table (it picks
+the agent for every session in this repo, see Configure), then one `[[map]]`
 per page (or block):
 
 ```toml
+workspace = "acme"
+
 [[map]]
 paths = ["src/billing/paddle.rs", "src/billing/plan*.rs"]
 page = "Billing"   # the page's id, or its exact title

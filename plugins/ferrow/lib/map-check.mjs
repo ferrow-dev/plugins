@@ -65,7 +65,7 @@ export function checkMap(text, files) {
 }
 
 const STATUS = {
-  page_unknown: (row) => `no page "${row.page}" on the server`,
+  page_unknown: (row) => `no page "${row.page}" on the server; create it with this exact title (/ferrow:map create ${row.entry}, or wiki_page_create)`,
   page_ambiguous: (row) => `more than one page is titled "${row.page}"; name it by id`,
   block_unknown: (row) => `page "${row.title ?? row.page}" has no block ${row.block}`,
 };

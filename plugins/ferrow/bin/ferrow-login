@@ -1,15 +1,24 @@
 #!/bin/sh
 # Connects this machine to Ferrow as an agent (wiki `14 · Agent layer` §17.5):
 # asks the server for a code, prints it with the page to approve it on, polls
-# until someone does, and files the agent's token in the credentials file.
-# The token is never printed. POSIX sh and curl, so Claude Code, Codex,
-# Hermes and a bare shell all run this one script.
+# until someone does, and files the agent's token in the credentials file
+# under its workspace. The token is never printed. POSIX sh and curl, so
+# Claude Code, Codex, Hermes and a bare shell all run this one script.
 #
-#   ferrow-login [--server URL] [--client ID] [--open] [--porcelain]
-#   ferrow-login --logout [--server URL]
+#   ferrow-login [WORKSPACE] [--cwd DIR] [--server URL] [--client ID] [--open] [--porcelain]
+#   ferrow-login --logout [WORKSPACE] [--cwd DIR] [--server URL]
+#
+# It knows the repo it runs for (--cwd, else the current directory): the
+# workspace given, or else the one the repo declares (lib/credentials.sh), is
+# sent as a hint the approval page pre-selects. When a token for that
+# workspace is already on file it only binds the repo to it. After an
+# approval it binds the repo (~/.config/ferrow/repos.json) unless its
+# ferrow.toml already names the workspace, warns when the approved workspace
+# is not the hinted one, and offers — never writes — the ferrow.toml line.
 #
 # --porcelain prints `url …`, `code …`, then `connected <workspace> <agent>`
-# or `error <code>`, one per line, for the mod to read.
+# or `error <code>`, and around those `bound <repo>`, `differs <hint>
+# <workspace>` and `offer <ferrow.toml line>`, one per line, for the mod.
 . "$(dirname "$0")/../lib/credentials.sh"
 
 server=""
@@ -17,17 +26,32 @@ client="ferrow-claude-code"
 open=""
 porcelain=""
 logout=""
+wanted=""
+dir="$(pwd)"
 while [ $# -gt 0 ]; do
   case "$1" in
     --server) server="$2"; shift 2 ;;
     --client) client="$2"; shift 2 ;;
+    --cwd) dir="$2"; shift 2 ;;
     --open) open=1; shift ;;
     --porcelain) porcelain=1; shift ;;
     --logout) logout=1; shift ;;
-    *) printf 'ferrow-login: unknown option %s\n' "$1" >&2; exit 2 ;;
+    -*) printf 'ferrow-login: unknown option %s\n' "$1" >&2; exit 2 ;;
+    *) wanted="$1"; shift ;;
   esac
 done
 server="$(ferrow_server "$server")"
+FERROW_URL="$server"
+ferrow_resolve "$dir"
+# What the repo declares, as opposed to what it fell back to.
+case "$ferrow_why" in
+  env|ferrow.toml|binding) declared="$ferrow_ws" ;;
+  *) declared="" ;;
+esac
+hint="${wanted:-$declared}"
+root=""
+git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1 && root="$(ferrow_repo_root "$dir")"
+in_map="$(ferrow_map_workspace "$(ferrow_map_file "$dir")")"
 
 say() { [ -n "$porcelain" ] || printf '%s\n' "$*"; }
 tell() { [ -z "$porcelain" ] || printf '%s\n' "$*"; }
@@ -40,11 +64,30 @@ number() { printf '%s\n' "$1" | sed -nE "s/.*\"$2\"[[:space:]]*:[[:space:]]*([0-
 
 command -v curl >/dev/null 2>&1 || fail no_curl "curl is needed"
 
+# Binds the repo to a workspace, unless its ferrow.toml says which already.
+bind() {
+  [ -n "$root" ] || return 0
+  [ -n "$in_map" ] && return 0
+  [ "$(ferrow_bound "$root")" = "$1" ] && return 0
+  ferrow_bind "$root" "$1" || return 0
+  tell "bound $root"
+  say "Bound $root to $1 (in $(ferrow_repos))."
+}
+
+# The ferrow.toml line that would make the binding the team's, offered only.
+offer() {
+  [ -n "$root" ] && [ -z "$in_map" ] || return 0
+  tell "offer workspace = \"$1\""
+  say "To make this the team's choice, put workspace = \"$1\" at the top of $root/ferrow.toml."
+}
+
 if [ -n "$logout" ]; then
-  token="$(ferrow_file_token "$server")"
+  target="${wanted:-$ferrow_ws}"
+  token=""
+  [ -n "$target" ] && token="$(ferrow_file_token "$target")"
   if [ -z "$token" ]; then
     tell "disconnected"
-    say "Not connected to $server."
+    say "Not connected${target:+ to $target}."
     exit 0
   fi
   # Revoked first, so a token that could not be revoked is still on file
@@ -56,16 +99,28 @@ if [ -n "$logout" ]; then
     204|401|404) ;;
     *) fail revoke_failed "could not revoke the token at $server (HTTP ${status:-none}); still connected" ;;
   esac
-  ferrow_write_entry "$server" "" || fail write_failed "could not update $(ferrow_credentials)"
+  ferrow_write_entry "$target" "" || fail write_failed "could not update $(ferrow_credentials)"
   tell "disconnected"
-  say "Disconnected from $server; the token is revoked."
+  say "Disconnected from $target; the token is revoked."
+  exit 0
+fi
+
+# A workspace this machine already has an agent in needs no new token.
+if [ -n "$hint" ] && [ -n "$(ferrow_file_token "$hint")" ]; then
+  agent_name="$(ferrow_field "$(ferrow_entry "$hint")" agent_name)"
+  bind "$hint"
+  tell "connected $hint $agent_name"
+  say "Already connected to $hint as $agent_name."
+  offer "$hint"
   exit 0
 fi
 
 device="$( (hostname 2>/dev/null || uname -n) | tr -c 'A-Za-z0-9._-' '-' | sed 's/-*$//' | cut -c 1-64)"
 [ -n "$device" ] || device="unknown"
 
-started="$(printf 'client_id=%s&device_name=%s' "$client" "$device" |
+hint_field=""
+[ -n "$hint" ] && hint_field="&workspace=$(printf '%s' "$hint" | tr -c 'A-Za-z0-9._-' '-')"
+started="$(printf 'client_id=%s&device_name=%s%s' "$client" "$device" "$hint_field" |
   curl --silent --max-time 15 --data @- "$server/api/oauth/device_authorization")" ||
   fail unreachable "cannot reach $server"
 device_code="$(ferrow_field "$started" device_code)"
@@ -107,11 +162,20 @@ while [ "$waited" -lt "$expires" ]; do
     agent_id="$(ferrow_field "$answer" agent_id)"
     agent_name="$(ferrow_field "$answer" agent_name)"
     saved="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    entry="$(printf '{"token": "%s", "workspace": "%s", "agent_id": "%s", "agent_name": "%s", "device_name": "%s", "saved_at": "%s"}' \
-      "$token" "$workspace" "$agent_id" "$agent_name" "$device" "$saved")"
-    ferrow_write_entry "$server" "$entry" || fail write_failed "could not write $(ferrow_credentials)"
+    [ -n "$workspace" ] || fail no_workspace "$server did not say which workspace the agent is in"
+    entry="$(printf '{"token": "%s", "agent_id": "%s", "agent_name": "%s", "device_name": "%s", "saved_at": "%s"}' \
+      "$token" "$agent_id" "$agent_name" "$device" "$saved")"
+    ferrow_write_entry "$workspace" "$entry" || fail write_failed "could not write $(ferrow_credentials)"
+    if [ -n "$hint" ] && [ "$hint" != "$workspace" ]; then
+      tell "differs $hint $workspace"
+      say "Note: this repo works in $hint, but the agent was approved in $workspace."
+    fi
+    if [ -z "$declared" ] || [ "$declared" = "$workspace" ] || [ -n "$wanted" ]; then
+      bind "$workspace"
+    fi
     tell "connected $workspace $agent_name"
     say "Connected as $agent_name in $workspace."
+    offer "$workspace"
     exit 0
   fi
   case "$(ferrow_field "$answer" error)" in

@@ -31,7 +31,7 @@ export function ferrowClient({ url, token, client, fetch = globalThis.fetch }) {
   let id = 0
 
   async function mcp(name, args = {}, session) {
-    const res = await fetch(`${base}/mcp`, {
+    const res = await fetch(`${base}/mcp/agent`, {
       method: 'POST',
       headers: headers({
         'Content-Type': 'application/json',

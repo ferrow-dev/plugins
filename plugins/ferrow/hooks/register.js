@@ -7,6 +7,7 @@ import {
   connectLine,
   inboxList,
   liveObligations,
+  stopObligations,
   mapReport,
   mergeWatch,
   NO_USAGE,
@@ -17,6 +18,7 @@ import {
   sessionUsage,
   slimRow,
   suggestLines,
+  unknownLines,
   usageLine,
   usageReport,
   WATCH_PROMPT,
@@ -146,6 +148,11 @@ const mod = {
   source: null,
   /** `<agent> · <workspace>`, from the credentials file. */
   agent: null,
+  /** The workspace this session's repo works in, and why (bin/ferrow-workspace). */
+  workspace: null,
+  reason: null,
+  /** The workspaces with a token on file. */
+  known: [],
   interactive: false,
   /** The running `/ferrow:connect`: resolves to its code, or why it failed. */
   connecting: null,
@@ -200,7 +207,7 @@ function errorOf(res) {
 
 async function mcp($, name, args) {
   const session = (await $.state.get(SESSION)).value ?? null
-  const res = await $.http.fetch(`${mod.url}/mcp`, {
+  const res = await $.http.fetch(`${mod.url}/mcp/agent`, {
     method: 'POST',
     headers: { ...headers(session, true), Accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
@@ -222,7 +229,7 @@ async function mcp($, name, args) {
 
 async function loadTools($) {
   if (!mod.token) return
-  const res = await $.http.fetch(`${mod.url}/mcp`, {
+  const res = await $.http.fetch(`${mod.url}/mcp/agent`, {
     method: 'POST',
     headers: { ...headers(null, true), Accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
@@ -270,7 +277,8 @@ async function refreshObligations($, force) {
     if (!session) return
     const lists = [(await mcp($, 'obligations_list', { session })).json?.obligations ?? []]
     for (const item of await claimedItems($)) {
-      lists.push((await mcp($, 'obligations_list', { item, session })).json?.obligations ?? [])
+      const rows = (await mcp($, 'obligations_list', { item, session })).json?.obligations ?? []
+      lists.push(rows.map(one => ({ ...one, item })))
     }
     await $.state.set(OBLIGATIONS, liveObligations(lists))
     mod.lastCheck = now
@@ -523,6 +531,14 @@ async function suggestionsFor($, list) {
   return rest($, 'GET', `/agent/repo-map/suggest?paths=${paths}`)
 }
 
+/** The map `/ferrow:map` and the pane read: the one above the cwd, else the one above the first unmapped file. */
+async function sessionMap($, list) {
+  const cwd = await $.session.cwd()
+  return (await mapAt($, `${cwd}/${MAP_FILE}`)) ?? (list[0] ? await mapAt($, list[0].abs) : null)
+}
+
+const checkMap = ($, text) => (mod.token ? rest($, 'POST', '/agent/repo-map/check', { repo_map: text }).catch(() => null) : null)
+
 async function suggestPane($) {
   const list = await recheck($, (await $.state.get(UNMAPPED)).value ?? [])
   await $.state.set(UNMAPPED, list)
@@ -535,8 +551,27 @@ async function suggestPane($) {
       error = failure?.message ?? 'failed'
     }
   }
-  await $.state.set(SUGGESTIONS, { rows, error })
+  const found = await sessionMap($, list)
+  const entries = found ? entriesOf(found) : null
+  const unknown = entries ? unknownLines(entries, await checkMap($, found.text), mod.lang) : []
+  await $.state.set(SUGGESTIONS, { rows, error, unknown })
   await openPane($, 'map')
+}
+
+/** `/ferrow:map create N`: the page entry N names, created with its exact title when the server has none. */
+async function createMapped($, list, n) {
+  const w = words(mod.lang)
+  if (!mod.token) return NOT_CONNECTED
+  const found = await sessionMap($, list)
+  const entries = found ? entriesOf(found) : null
+  const entry = entries?.[n - 1]
+  if (!entry) return w.map.noEntry(n)
+  const title = entry.page.trim()
+  const checked = await rest($, 'POST', '/agent/repo-map/check', { repo_map: found.text })
+  const row = checked?.entries?.find(one => one.entry === n)
+  if (row?.status !== 'page_unknown') return w.map.exists(row?.title ?? title)
+  await mcp($, 'wiki_page_create', { workspace: await workspace($), title })
+  return w.map.created(title)
 }
 
 async function watch($, turnId) {
@@ -610,7 +645,12 @@ async function waive($, obligations, reason) {
 async function closeGate($, e, next) {
   if (!mod.token || !(await $.state.get(SESSION)).value) return next(e)
   await refreshObligations($, true).catch(() => {})
-  const open = (await $.state.get(OBLIGATIONS)).value ?? []
+  const open = stopObligations(
+    (await $.state.get(OBLIGATIONS)).value ?? [],
+    (await $.state.get(LEASE)).value ?? null,
+    (await $.state.get(LEASE_UNTIL)).value ?? null,
+    await $.clock.now(),
+  )
   if (open.length === 0) return next(e)
   const tr = mod.lang === 'tr'
   const choices = tr
@@ -636,13 +676,14 @@ async function closeGate($, e, next) {
   const reasons = tr
     ? ['Bu değişiklik sayfayı etkilemiyor', 'Sayfa zaten güncel']
     : ['This change does not affect the page', 'The page is already up to date']
-  let reason = choice === choices[1] ? null : choice
-  if (reason === null) {
-    try {
-      reason = await $.ui.ask(tr ? 'Neden gerekmiyor? (en az 10 karakter)' : 'Why is it not needed? (10 characters at least)', reasons)
-    } catch {
-      return next(e)
-    }
+  // Only the waive choice waives: text typed in place of a choice is the
+  // person saying something else, often a question, never a reason (FERR-47).
+  if (choice !== choices[1]) return next(e)
+  let reason
+  try {
+    reason = await $.ui.ask(tr ? 'Neden gerekmiyor? (en az 10 karakter)' : 'Why is it not needed? (10 characters at least)', reasons)
+  } catch {
+    return next(e)
   }
   if (typeof reason !== 'string' || reason.trim().length < MIN_WAIVE) return next(e)
   await waive($, open, reason.trim())
@@ -680,7 +721,27 @@ function watchStatus(queue, usage, error) {
 function tokenLine() {
   if (mod.source === 'file') return `${mod.agent ?? 'agent'} (credentials file)`
   if (mod.source === 'env') return 'FERROW_AGENT_TOKEN'
-  return NOT_CONNECTED
+  return notConnected()
+}
+
+const REASONS = {
+  env: 'FERROW_WORKSPACE',
+  'ferrow.toml': "the repo's ferrow.toml",
+  binding: 'bound to this repo (/ferrow:connect)',
+  only: 'the only one on file',
+  none: 'nothing on file',
+  several: 'several on file, and this repo names none',
+}
+
+function workspaceLine() {
+  const why = REASONS[mod.reason] ?? mod.reason ?? 'unknown'
+  return mod.workspace ? `${mod.workspace} (${why})` : `none (${why})`
+}
+
+/** Why there is no token, in the words the band uses. */
+function notConnected() {
+  return connectLine({ connected: false, reason: mod.reason, workspace: mod.workspace, known: mod.known }, mod.lang, 400)
+    .replace(/^ferrow · /, '')
 }
 
 function packText(text) {
@@ -689,32 +750,47 @@ function packText(text) {
   return lines.length > PACK_LINES ? `${head}\n… ${lines.length - PACK_LINES} more lines (context_pack)` : head
 }
 
-async function credentialsFile($) {
-  const base = (await $.env.get('XDG_CONFIG_HOME')) || `${await $.env.get('HOME')}/.config`
-  return `${base}/ferrow/credentials.json`
-}
-
-/** The credentials file's entry for `url` (wiki §17.4), or null. */
-export async function savedEntry($, url) {
-  try {
-    const entry = JSON.parse(await $.fs.read(await credentialsFile($)))?.servers?.[url]
-    return typeof entry?.token === 'string' && entry.token ? entry : null
-  } catch {
-    return null
+/** bin/ferrow-workspace's lines: `{workspace, reason, agent, envok, known, token}`. */
+export function workspaceLines(stdout) {
+  const found = { workspace: null, reason: null, agent: null, envok: false, known: [], token: null }
+  for (const line of String(stdout ?? '').split('\n')) {
+    const { word, rest } = loginLine(line)
+    if (word === 'workspace' || word === 'agent') found[word] = rest && rest !== '-' ? rest : null
+    else if (word === 'reason') found.reason = rest || null
+    else if (word === 'envok') found.envok = rest === '1'
+    else if (word === 'known') found.known = rest ? rest.split(' ') : []
+    else if (word === 'token') found.token = rest || null
   }
+  return found
 }
 
-/** The file first, then FERROW_AGENT_TOKEN, as the helper and the shim read them. */
+/** The workspace this session's repo works in and its token (wiki §17.4).
+    Resolved by bin/ferrow-workspace, the code the MCP helper and the hooks
+    run too, so the three never pick different agents. A token from
+    FERROW_AGENT_TOKEN only where that may stand in; when the script cannot
+    run at all, as before there were workspaces. */
 async function loadToken($) {
-  const saved = await savedEntry($, mod.url)
   const env = (await $.env.get('FERROW_AGENT_TOKEN')) || undefined
-  mod.token = saved?.token ?? env
-  mod.source = saved ? 'file' : env ? 'env' : null
-  mod.agent = saved ? [saved.agent_name, saved.workspace].filter(Boolean).join(' · ') : null
+  let found
+  try {
+    const argv = ['sh', `${$.plugin.root}/bin/ferrow-workspace`, '--server', mod.url, '--cwd', await $.session.cwd(), '--token']
+    const r = await $.process.run(argv, { timeoutMs: 10000 })
+    found = r.exitCode === 0 ? workspaceLines(r.stdout) : null
+    if (!found?.reason) found = null
+  } catch {
+    found = null
+  }
+  found ??= { workspace: null, reason: 'none', agent: null, envok: true, known: [], token: null }
+  mod.workspace = found.workspace
+  mod.reason = found.reason
+  mod.known = found.known
+  mod.token = found.token ?? (found.envok ? env : undefined)
+  mod.source = found.token ? 'file' : mod.token ? 'env' : null
+  mod.agent = found.token ? [found.agent, found.workspace].filter(Boolean).join(' · ') : null
 }
 
-function login($, ...args) {
-  return ['sh', `${$.plugin.root}/bin/ferrow-login`, '--porcelain', '--server', mod.url, ...args]
+async function login($, ...args) {
+  return ['sh', `${$.plugin.root}/bin/ferrow-login`, '--porcelain', '--server', mod.url, '--cwd', await $.session.cwd(), ...args]
 }
 
 /** One `--porcelain` line of bin/ferrow-login: `url …`, `code …`, `connected …`, `error …`. */
@@ -738,11 +814,26 @@ async function connected($, found) {
   }
   const hint = linked && !linked.isConnected ? ' · /mcp → ferrow → Reconnect' : ''
   $.ui.toast(`ferrow: ${mod.lang === 'tr' ? 'bağlandı' : 'connected'} · ${mod.agent ?? found.connected}${hint}`)
+  for (const note of loginNotes(found, mod.lang)) $.ui.toast(`ferrow: ${note}`)
+}
+
+/** What bin/ferrow-login said besides `connected`: the binding it wrote,
+    a workspace other than the hinted one, and the ferrow.toml line it offers. */
+export function loginNotes(found, lang) {
+  const tr = lang === 'tr'
+  const notes = []
+  if (found.differs) {
+    const [hint, got] = found.differs.split(' ')
+    notes.push(tr ? `bu repo ${hint} kullanıyor, ajan ${got} için onaylandı` : `this repo works in ${hint}, but the agent was approved in ${got}`)
+  }
+  if (found.bound) notes.push(tr ? `${found.bound} bu çalışma alanına bağlandı` : `bound ${found.bound} to this workspace`)
+  if (found.offer) notes.push(tr ? `ekibin seçimi olsun diye ferrow.toml'un başına: ${found.offer}` : `to make it the team's choice, put ${found.offer} at the top of ferrow.toml`)
+  return notes
 }
 
 /** Runs bin/ferrow-login, which files the token; resolves once the code is
     known (or the login failed), and finishes in the background. */
-function connect($) {
+function connect($, target) {
   if (mod.connecting) return mod.connecting
   let ready
   mod.connecting = new Promise(resolve => (ready = resolve))
@@ -750,7 +841,7 @@ function connect($) {
   void (async () => {
     let buffer = ''
     try {
-      for await (const piece of $.process.spawn({ argv: login($, '--open') })) {
+      for await (const piece of $.process.spawn({ argv: await login($, '--open', ...(target ? [target] : [])) })) {
         if (piece.stream !== 'stdout' || typeof piece.text !== 'string') continue
         buffer += piece.text
         let at
@@ -767,7 +858,8 @@ function connect($) {
     } catch (error) {
       found.error ??= error?.message ?? 'failed'
     }
-    ready({ error: found.error ?? 'failed' })
+    // Without a code: the workspace already had a token, and the repo is bound to it.
+    ready(found.connected !== undefined ? { found } : { error: found.error ?? 'failed' })
     await connected($, found).catch(() => {})
     mod.connecting = null
   })()
@@ -920,7 +1012,11 @@ export function register(on, options = {}) {
     if (e.props.hasSurvey) return next(e)
     const columns = e.props.bodyColumns ?? 80
     const connecting = (await $.state.get(CONNECTING)).value ?? null
-    const single = connectLine({ connecting, connected: Boolean(mod.token) }, mod.lang, columns)
+    const single = connectLine(
+      { connecting, connected: Boolean(mod.token), reason: mod.reason, workspace: mod.workspace, known: mod.known },
+      mod.lang,
+      columns,
+    )
     const { Box, Text, Button } = $.ui.resolve(e)
     if (single) return Box({ flexDirection: 'row', children: [Text({ wrap: 'truncate', children: single })] })
     const model = bandModel(await bandState($), mod.lang, columns)
@@ -945,6 +1041,7 @@ export function register(on, options = {}) {
     } else if (view === 'map') {
       const found = (await $.state.get(SUGGESTIONS)).value ?? null
       if (found?.error) lines.push(`ferrow: ${found.error}`)
+      if (found?.unknown?.length) lines.push(...found.unknown, '')
       lines.push(...suggestLines(found?.rows ?? [], mod.lang))
     } else {
       lines.push(obligationsList((await $.state.get(OBLIGATIONS)).value ?? [], mod.lang))
@@ -965,16 +1062,22 @@ export function register(on, options = {}) {
         `wake         ${await wakeMode($)}${mod.loop ? ' (polling)' : ''}`,
         `usage        ${usageLine((await $.state.get(USAGE)).value ?? NO_USAGE) ?? 'none yet'}`,
         `watchman     ${await watchmanMode($)}${watchStatus((await $.state.get(WATCH)).value, (await $.state.get(WATCH_USAGE)).value, (await $.state.get(WATCH_ERROR)).value)}`,
+        `workspace    ${workspaceLine()}`,
         `server       ${mod.url} · ${tokenLine()}`,
         `edited       ${touched.length} file(s)`,
       ].join('\n'),
     }
   }).catch(() => ({ text: 'status unavailable' }))
 
-  on('command.run', { command: 'ferrow:connect' }, async $ => {
-    const r = await connect($)
+  on('command.run', { command: 'ferrow:connect' }, async ($, e) => {
+    const r = await connect($, (e.args ?? '').trim().split(/\s+/)[0] || null)
     const tr = mod.lang === 'tr'
     if (r.error) return { text: `ferrow: ${tr ? 'bağlanılamadı' : 'could not connect'} (${r.error})` }
+    if (r.found) {
+      const [workspace, ...agent] = r.found.connected.split(' ')
+      const head = tr ? `ferrow: ${workspace} için zaten bağlı (${agent.join(' ')})` : `ferrow: already connected to ${workspace} as ${agent.join(' ')}`
+      return { text: [head, ...loginNotes(r.found, mod.lang)].join('\n') }
+    }
     return {
       text: tr
         ? `Tarayıcıda ${r.url} adresini aç ve ${r.code} kodunu onayla. Onaylayınca Ferrow kendiliğinden bağlanır.`
@@ -987,7 +1090,7 @@ export function register(on, options = {}) {
       return { text: mod.source === 'env' ? 'connected with FERROW_AGENT_TOKEN; unset it to disconnect' : NOT_CONNECTED }
     }
     await endSession($).catch(() => {})
-    const r = await $.process.run(login($, '--logout'), { timeoutMs: 20000 })
+    const r = await $.process.run(await login($, '--logout'), { timeoutMs: 20000 })
     const said = r.stdout.trim().split('\n').pop() ?? ''
     if (said !== 'disconnected') return { text: `ferrow: ${r.stderr.trim() || said || 'logout failed'}` }
     await loadToken($)
@@ -1066,19 +1169,20 @@ export function register(on, options = {}) {
     return { text: packText(text) }
   }).catch(() => ({ text: 'pack unavailable' }))
 
-  on('command.run', { command: 'ferrow:map' }, async $ => {
-    const cwd = await $.session.cwd()
+  on('command.run', { command: 'ferrow:map' }, async ($, e) => {
     const list = await recheck($, (await $.state.get(UNMAPPED)).value ?? [])
     await $.state.set(UNMAPPED, list)
-    const found = (await mapAt($, `${cwd}/${MAP_FILE}`)) ?? (list[0] ? await mapAt($, list[0].abs) : null)
-    if (!found) return { text: mapReport({ cwd }, mod.lang) }
+    const [verb, n] = (e?.args ?? '').trim().split(/\s+/)
+    if (verb === 'create') return { text: await createMapped($, list, Number(n)) }
+    const found = await sessionMap($, list)
+    if (!found) return { text: mapReport({ cwd: await $.session.cwd() }, mod.lang) }
     let entries
     try {
       entries = parseRepoMap(found.text)
     } catch (error) {
       return { text: mapReport({ file: found.file, error: `ferrow.toml does not parse: ${error?.message ?? error}` }, mod.lang) }
     }
-    const checked = mod.token ? await rest($, 'POST', '/agent/repo-map/check', { repo_map: found.text }).catch(() => null) : null
+    const checked = await checkMap($, found.text)
     let suggestions = null
     if (list.length > 0 && mod.token) {
       suggestions = await suggestionsFor($, list).catch(() => null)
