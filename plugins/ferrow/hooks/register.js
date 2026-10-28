@@ -789,7 +789,7 @@ async function loadToken($) {
   mod.agent = found.token ? [found.agent, found.workspace].filter(Boolean).join(' · ') : null
 }
 
-async function login($, ...args) {
+async function login($, args) {
   return ['sh', `${$.plugin.root}/bin/ferrow-login`, '--porcelain', '--server', mod.url, '--cwd', await $.session.cwd(), ...args]
 }
 
@@ -841,7 +841,7 @@ function connect($, target) {
   void (async () => {
     let buffer = ''
     try {
-      for await (const piece of $.process.spawn({ argv: await login($, '--open', ...(target ? [target] : [])) })) {
+      for await (const piece of $.process.spawn({ argv: await login($, target ? ['--open', target] : ['--open']) })) {
         if (piece.stream !== 'stdout' || typeof piece.text !== 'string') continue
         buffer += piece.text
         let at
@@ -1090,7 +1090,7 @@ export function register(on, options = {}) {
       return { text: mod.source === 'env' ? 'connected with FERROW_AGENT_TOKEN; unset it to disconnect' : NOT_CONNECTED }
     }
     await endSession($).catch(() => {})
-    const r = await $.process.run(await login($, '--logout'), { timeoutMs: 20000 })
+    const r = await $.process.run(await login($, ['--logout']), { timeoutMs: 20000 })
     const said = r.stdout.trim().split('\n').pop() ?? ''
     if (said !== 'disconnected') return { text: `ferrow: ${r.stderr.trim() || said || 'logout failed'}` }
     await loadToken($)
