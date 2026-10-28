@@ -157,6 +157,40 @@ ferrow_repo_root() {
   git -C "$1" rev-parse --show-toplevel 2>/dev/null || (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
 }
 
+# The directory the Claude Code session runs in, for bin/ferrow-headers.
+# Claude Code runs a plugin server's headersHelper in the plugin's own
+# directory and passes the session's in no variable, so it is the cwd of the
+# `claude` process above. The walk goes up only through processes standing in
+# the helper's directory (the helper, the `sh` Claude Code starts it with):
+# the first that stands elsewhere is either `claude` or not a session, and
+# then the helper's own directory is the answer.
+ferrow_session_dir() {
+  _fhere="$(pwd -P)"
+  _fpid="$PPID" _fsteps=0
+  while [ "$_fsteps" -lt 4 ] && [ "${_fpid:-0}" -gt 1 ]; do
+    if [ -r "/proc/$_fpid/stat" ]; then
+      _fcomm="$(cat "/proc/$_fpid/comm" 2>/dev/null)"
+      _fcwd="$(readlink "/proc/$_fpid/cwd" 2>/dev/null)"
+      _fnext="$(sed 's/.*) //' "/proc/$_fpid/stat" 2>/dev/null | cut -d ' ' -f 2)"
+    else
+      _fps="$(ps -o ppid= -o comm= -p "$_fpid" 2>/dev/null)" || break
+      _fnext="$(printf '%s\n' "$_fps" | awk '{ print $1 }')"
+      _fcomm="$(basename "$(printf '%s\n' "$_fps" | sed -E 's/^ *[0-9]+ +//')")"
+      _fcwd="$(lsof -a -p "$_fpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+    fi
+    [ -n "$_fcwd" ] || break
+    case "$_fcomm" in
+      claude | claude-* | claude.*)
+        printf '%s\n' "$_fcwd"
+        return 0
+        ;;
+    esac
+    [ "$_fcwd" = "$_fhere" ] || break
+    _fpid="$_fnext" _fsteps=$((_fsteps + 1))
+  done
+  printf '%s\n' "$_fhere"
+}
+
 # The nearest ferrow.toml at or above a directory, up to its repo's root.
 ferrow_map_file() {
   _fat="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
